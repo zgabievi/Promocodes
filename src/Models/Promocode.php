@@ -1,150 +1,182 @@
 <?php
 
-namespace Gabievi\Promocodes\Models;
+namespace Zorb\Promocodes\Models;
 
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
-/**
- * @method static byCode(string $code)
- * @method static pluck(string $string)
- * @method static insert(array $records)
- */
 class Promocode extends Model
 {
-    /**
-     * Indicates if the model should be timestamped.
-     *
-     * @var bool
-     */
-    public $timestamps = false;
+    use SoftDeletes;
 
     /**
      * The attributes that are mass assignable.
      *
      * @var array
      */
-    protected $fillable = ['code', 'reward', 'is_disposable', 'expires_at', 'quantity'];
+    protected $fillable = [
+        'code', 'quantity', 'data', 'is_disposable', 'auth_required', 'expires_at',
+    ];
 
     /**
-     * The attributes that should be cast to native types.
+     * The attributes that should be cast.
      *
      * @var array
      */
     protected $casts = [
-        'is_disposable' => 'boolean',
+        'quantity' => 'integer',
         'data' => 'array',
-        'quantity' => 'integer'
+        'is_disposable' => 'boolean',
+        'auth_required' => 'boolean',
+        'expires_at' => 'datetime',
     ];
 
     /**
-     * The attributes that should be mutated to dates.
-     *
-     * @var array
-     */
-    protected $dates = ['expires_at'];
-
-    /**
-     * Promocode constructor.
+     * Create a new Eloquent model instance.
      *
      * @param array $attributes
+     * @return void
      */
     public function __construct(array $attributes = [])
     {
         parent::__construct($attributes);
 
-        $this->table = config('promocodes.table', 'promocodes');
+        $this->setTable(config('promocodes.database.promocodes_table'));
     }
 
     /**
-     * Get the users who is related promocode.
+     * Promocode and user connection.
      *
-     * @return \Illuminate\Database\Eloquent\Relations\BelongsToMany
+     * @return BelongsToMany
      */
-    public function users()
+    public function users(): BelongsToMany
     {
-        return $this->belongsToMany(config('promocodes.user_model'), config('promocodes.relation_table'),
-            config('promocodes.foreign_pivot_key', 'user_id'), config('promocodes.related_pivot_key', 'user_id'))
+        $related = config('promocodes.database.user_model');
+        $table = config('promocodes.database.pivot_table', 'promocode_user');
+        $foreignPivotKey = config('promocodes.database.foreign_pivot_key', 'promocode_id');
+        $relatedPivotKey = config('promocodes.database.related_pivot_key', 'user_id');
+
+        return $this->belongsToMany($related, $table, $foreignPivotKey, $relatedPivotKey)
+            ->using(PromocodeUser::class)
             ->withPivot('used_at');
     }
 
     /**
-     * Query builder to find promocode using code.
+     * Scopes record by code.
      *
-     * @param $query
-     * @param $code
-     *
-     * @return mixed
+     * @param Builder $builder
+     * @param string $code
+     * @return Builder
      */
-    public function scopeByCode($query, $code)
+    public function scopeByCode(Builder $builder, string $code): Builder
     {
-        return $query->where('code', $code);
+        return $builder->where('code', $code);
     }
 
     /**
-     * Query builder to get disposable codes.
+     * Scopes expired records.
      *
-     * @param $query
-     * @return mixed
+     * @param Builder $builder
+     * @return Builder
      */
-    public function scopeIsDisposable($query)
+    public function scopeExpired(Builder $builder): Builder
     {
-        return $query->where('is_disposable', true);
+        return $builder->whereNotNull('expires_at')
+            ->whereDate('expires_at', '<=', Carbon::now());
     }
 
     /**
-     * Query builder to get non-disposable codes.
+     * Scopes not expired records.
      *
-     * @param $query
-     * @return mixed
+     * @param Builder $builder
+     * @return Builder
      */
-    public function scopeIsNotDisposable($query)
+    public function scopeNotExpired(Builder $builder): Builder
     {
-        return $query->where('is_disposable', false);
+        return $builder->whereNull('expires_at')
+            ->orWhereDate('expires_at', '>', Carbon::now());
     }
 
     /**
-     * Query builder to get expired promotion codes.
+     * Scopes disposable records.
      *
-     * @param $query
-     * @return mixed
+     * @param Builder $builder
+     * @return Builder
      */
-    public function scopeExpired($query)
+    public function scopeDisposable(Builder $builder): Builder
     {
-        return $query->whereNotNull('expires_at')->whereDate('expires_at', '<=', Carbon::now());
+        return $builder->where('is_disposable', true);
     }
 
     /**
-     * Check if code is disposable (ont-time).
+     * Scopes non-disposable records.
+     *
+     * @param Builder $builder
+     * @return Builder
+     */
+    public function scopeNonDisposable(Builder $builder): Builder
+    {
+        return $builder->where('is_disposable', false);
+    }
+
+    /**
+     * Determine if the given model is available for use.
      *
      * @return bool
      */
-    public function isDisposable()
+    public function isAvailable(): bool
+    {
+        return $this->hasQuantity() && !$this->isExpired();
+    }
+
+    /**
+     * Determine if the given model has quantity left.
+     *
+     * @return bool
+     */
+    public function hasQuantity(): bool
+    {
+        if ($this->quantity === null) {
+            return true;
+        }
+
+        return $this->quantity > 0;
+    }
+
+    /**
+     * Determine if the given model is expired.
+     *
+     * @return bool
+     */
+    public function isExpired(): bool
+    {
+        if ($this->expires_at === null) {
+            return false;
+        }
+
+        return Carbon::now()->gte($this->expires_at);
+    }
+
+    /**
+     * Determine if the given model is disposable.
+     *
+     * @return bool
+     */
+    public function isDisposable(): bool
     {
         return $this->is_disposable;
     }
 
     /**
-     * Check if code is expired.
+     * Determine if the given model requires authentication.
      *
      * @return bool
      */
-    public function isExpired()
+    public function authRequired(): bool
     {
-        return $this->expires_at ? Carbon::now()->gte($this->expires_at) : false;
-    }
-
-    /**
-     * Check if code amount is over.
-     *
-     * @return bool
-     */
-    public function isOverAmount()
-    {
-        if (is_null($this->quantity)) {
-            return false;
-        }
-
-        return $this->quantity <= 0;
+        return $this->auth_required;
     }
 }

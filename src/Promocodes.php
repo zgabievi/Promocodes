@@ -1,12 +1,11 @@
 <?php
 
-namespace Gabievi\Promocodes;
+namespace Zorb\Promocodes;
 
 use Carbon\Carbon;
-use Gabievi\Promocodes\Models\Promocode;
-use Gabievi\Promocodes\Exceptions\AlreadyUsedException;
-use Gabievi\Promocodes\Exceptions\UnauthenticatedException;
-use Gabievi\Promocodes\Exceptions\InvalidPromocodeException;
+use Illuminate\Support\Collection;
+use Zorb\Promocodes\Models\Promocode;
+use Symfony\Component\HttpFoundation\Response;
 
 class Promocodes
 {
@@ -32,13 +31,6 @@ class Promocodes
     protected $amount = 1;
 
     /**
-     * Reward value which will be sticked to code
-     *
-     * @var null
-     */
-    protected $reward = null;
-
-    /**
      * Additional data to be returned with code
      *
      * @var array
@@ -60,6 +52,13 @@ class Promocodes
     protected $quantity = null;
 
     /**
+     * Indicator that defines if auth is required
+     *
+     * @var bool
+     */
+    protected $auth_required = false;
+
+    /**
      * If code should automatically invalidate after first use
      *
      * @var bool
@@ -67,12 +66,32 @@ class Promocodes
     protected $disposable = false;
 
     /**
-     * Generated codes will be saved here
-     * to be validated later.
+     * Characters that should be used for code generation
+     *
+     * @var null|string
+     */
+    protected $characters = null;
+
+    /**
+     * Mask to be used to generate code pattern
+     *
+     * @var null|string
+     */
+    protected $mask = null;
+
+    /**
+     * Delimiter to be used for prefix/suffix separation
+     *
+     * @var null|string
+     */
+    protected $delimiter = null;
+
+    /**
+     * Generated codes will be saved here to be validated later
      *
      * @var array
      */
-    private $codes = [];
+    protected $available_codes = [];
 
     /**
      * Length of code will be calculated from asterisks you have
@@ -80,140 +99,116 @@ class Promocodes
      *
      * @var int
      */
-    private $length;
+    protected $length;
 
     /**
      * Promocodes constructor.
      */
     public function __construct()
     {
-        $this->codes = Promocode::pluck('code')->toArray();
-        $this->length = substr_count(config('promocodes.mask'), '*');
-
-        $this->prefix = (bool)config('promocodes.prefix')
-            ? config('promocodes.prefix') . config('promocodes.separator')
-            : '';
-
-        $this->suffix = (bool)config('promocodes.suffix')
-            ? config('promocodes.separator') . config('promocodes.suffix')
-            : '';
+        $this->available_codes = Promocode::pluck('code')->toArray();
+        $this->length = substr_count($this->getMask(), '*');
     }
 
     /**
-     * Save one-time use promocodes into database
-     * Successful insert returns generated promocodes
-     * Fail will return empty collection.
+     * Get mask that has been custom set
      *
-     * @param int $amount
-     * @param null $reward
-     * @param array $data
-     * @param int|null $expires_in
-     * @param int|null $quantity
-     *
-     * @return \Illuminate\Support\Collection
+     * @return string|null
      */
-    public function createDisposable(
-        $amount = null,
-        $reward = null,
-        $data = null,
-        $expires_in = null,
-        $quantity = null
-    )
+    public function getMask(): ?string
     {
-        return $this->create($amount, $reward, $data, $expires_in, $quantity, true);
+        return $this->mask ?? config('promocodes.mask');
     }
 
     /**
-     * Save promocodes into database
-     * Successful insert returns generated promocodes
-     * Fail will return empty collection.
+     * Set custom mask for next code generation
      *
-     * @param int $amount
-     * @param null $reward
+     * @param string $mask
+     * @return self
+     */
+    public function setMask(string $mask): self
+    {
+        $this->mask = $mask;
+        $this->length = substr_count($mask, '*');
+
+        return $this;
+    }
+
+    /**
+     * Set custom expiry for next code generation
+     *
+     * @param int $expires_in
+     * @return self
+     */
+    public function setExpiry(int $expires_in): self
+    {
+        $this->expires_in = $expires_in;
+
+        return $this;
+    }
+
+    /**
+     * Create promotional codes and save them to database.
+     *
      * @param array $data
-     * @param int|null $expires_in
-     * @param bool $is_disposable
-     * @param int|null $quantity
-     *
      * @return \Illuminate\Support\Collection
      */
-    public function create(
-        $amount = null,
-        $reward = null,
-        $data = null,
-        $expires_in = null,
-        $quantity = null,
-        $is_disposable = null
-    )
+    public function create(array $data = null): Collection
     {
-        $records = [];
-
-        foreach ($this->output($amount) as $code) {
-            $records[] = [
+        return $this->output()->map(function (string $code) use ($data) {
+            return Promocode::create([
                 'code' => $code,
-                'reward' => $this->getReward($reward),
-                'data' => json_encode($this->getData($data)),
-                'expires_at' => $this->getExpiresIn($expires_in) ? Carbon::now()->addDays($this->getExpiresIn($expires_in)) : null,
-                'is_disposable' => $this->getDisposable($is_disposable),
-                'quantity' => $this->getQuantity($quantity),
-            ];
-        }
-
-        if (Promocode::insert($records)) {
-            return collect($records)->map(function ($record) {
-                $record['data'] = json_decode($record['data'], true);
-
-                return $record;
-            });
-        }
-
-        return collect([]);
+                'data' => $this->getData($data),
+                'expires_at' => $this->getExpiry() ? Carbon::now()->addDays($this->getExpiry()) : null,
+                'is_disposable' => $this->getDisposable(),
+                'auth_required' => $this->getAuthRequired(),
+                'quantity' => $this->getQuantity(),
+            ]);
+        });
     }
 
     /**
-     * Generates promocodes as many as you wish.
+     * Outputs generated promotional codes.
      *
-     * @param int $amount
-     *
-     * @return array
+     * @return \Illuminate\Support\Collection
      */
-    public function output($amount = null)
+    public function output(): Collection
     {
-        $collection = [];
+        $collection = collect([]);
 
-        for ($i = 1; $i <= $this->getAmount($amount); $i++) {
+        for ($i = 1; $i <= $this->getAmount(); $i++) {
             $random = $this->generate();
 
             while (!$this->validate($collection, $random)) {
                 $random = $this->generate();
             }
 
-            array_push($collection, $random);
+            $collection->push($random);
         }
 
         return $collection;
     }
 
     /**
-     * Get number of codes to be generated
+     * Get amount that has been custom set
      *
-     * @param null|int $request
-     * @return null|int
+     * @return int|null
      */
-    public function getAmount($request)
+    public function getAmount(): ?int
     {
-        return $request !== null ? $request : $this->amount;
+        return $this->amount;
     }
 
     /**
-     * Set how much code you want to be generated
+     * Set custom amount for next code generation
      *
      * @param int $amount
-     * @return $this
+     * @return self
      */
-    public function setAmount($amount)
+    public function setAmount(int $amount = 1): self
     {
         $this->amount = $amount;
+
         return $this;
     }
 
@@ -222,12 +217,12 @@ class Promocodes
      *
      * @return string
      */
-    private function generate()
+    public function generate(): string
     {
-        $characters = config('promocodes.characters');
-        $mask = config('promocodes.mask');
-        $promocode = '';
+        $characters = $this->getCharacters();
+        $mask = $this->getMask();
         $random = [];
+        $code = '';
 
         for ($i = 1; $i <= $this->length; $i++) {
             $character = $characters[rand(0, strlen($characters) - 1)];
@@ -237,282 +232,353 @@ class Promocodes
         shuffle($random);
         $length = count($random);
 
-        $promocode .= $this->prefix;
+
+        if ($prefix = $this->getPrefix()) {
+            $code .= $prefix;
+            $code .= $this->getDelimiter();
+        }
 
         for ($i = 0; $i < $length; $i++) {
             $mask = preg_replace('/\*/', $random[$i], $mask, 1);
         }
 
-        $promocode .= $mask;
-        $promocode .= $this->suffix;
+        $code .= $mask;
 
-        return $promocode;
+        if ($suffix = $this->getSuffix()) {
+            $code .= $this->getDelimiter();
+            $code .= $suffix;
+        }
+
+        return $code;
     }
 
     /**
-     * Your code will be validated to be unique for one request.
+     * Get characters that has been custom set
      *
-     * @param $collection
-     * @param $new
+     * @return string|null
+     */
+    public function getCharacters(): ?string
+    {
+        return $this->characters ?? config('promocodes.characters');
+    }
+
+    /**
+     * Set custom characters for next code generation
+     *
+     * @param string $characters
+     * @return self
+     */
+    public function setCharacters(string $characters): self
+    {
+        $this->characters = $characters;
+
+        return $this;
+    }
+
+    /**
+     * Get prefix that has been custom set
+     *
+     * @return string|null
+     */
+    public function getPrefix(): ?string
+    {
+        return $this->prefix ?? config('promocodes.prefix');
+    }
+
+    /**
+     * Set custom prefix for next code generation
+     *
+     * @param string $prefix
+     * @return self
+     */
+    public function setPrefix(string $prefix): self
+    {
+        $this->prefix = $prefix;
+
+        return $this;
+    }
+
+    /**
+     * Get delimiter that has been custom set
+     *
+     * @return string|null
+     */
+    public function getDelimiter(): ?string
+    {
+        return $this->delimiter ?? config('promocodes.delimiter');
+    }
+
+    /**
+     * Set custom delimiter for next code generation
+     *
+     * @param string $delimiter
+     * @return self
+     */
+    public function setDelimiter(string $delimiter): self
+    {
+        $this->delimiter = $delimiter;
+
+        return $this;
+    }
+
+    /**
+     * Get suffix that has been custom set
+     *
+     * @return string|null
+     */
+    public function getSuffix(): ?string
+    {
+        return $this->suffix ?? config('promocodes.suffix');
+    }
+
+    /**
+     * Set custom suffix for next code generation
+     *
+     * @param string $suffix
+     * @return self
+     */
+    public function setSuffix(string $suffix): self
+    {
+        $this->suffix = $suffix;
+
+        return $this;
+    }
+
+    /**
+     * Generated code will be validated to be unique for one request
+     *
+     * @param \Illuminate\Support\Collection $collection
+     * @param string $code
      *
      * @return bool
      */
-    private function validate($collection, $new)
+    public function validate(Collection $collection, string $code): bool
     {
-        return !in_array($new, array_merge($collection, $this->codes));
+        return !$collection->merge($this->available_codes)->contains($code);
     }
 
     /**
-     * Get custom set reward value
+     * Get data that has been custom set
      *
-     * @param null|int $request
-     * @return null|int
+     * @param array|null $initial
+     * @return array|null
      */
-    public function getReward($request)
+    public function getData(?array $initial = null): ?array
     {
-        return $request !== null ? $request : $this->reward;
+        return $initial ?? $this->data;
     }
 
     /**
-     * Set custom reward value
-     *
-     * @param int $reward
-     * @return $this
-     */
-    public function setReward($reward)
-    {
-        $this->reward = $reward;
-        return $this;
-    }
-
-    /**
-     * Get custom set data value
-     *
-     * @param null|array $data
-     * @return null|array
-     */
-    public function getData($request)
-    {
-        return $request !== null ? $request : $this->data;
-    }
-
-    /**
-     * Set custom data value
+     * Set custom data for next code generation
      *
      * @param array $data
-     * @return $this
+     * @return self
      */
-    public function setData($data)
+    public function setData(array $data = []): self
     {
         $this->data = $data;
+
         return $this;
     }
 
     /**
-     * Get custom set expiration days value
+     * Get expiry that has been custom set
      *
-     * @param null|int $request
-     * @return null|int
+     * @return int|null
      */
-    public function getExpiresIn($request)
+    public function getExpiry(): ?int
     {
-        return $request !== null ? $request : $this->expires_in;
+        return $this->expires_in;
     }
 
     /**
-     * Set custom expiration days value
+     * Get disposable that has been custom set
      *
-     * @param int $expires_in
-     * @return $this
+     * @return bool|null
      */
-    public function setExpiresIn($expires_in)
+    public function getDisposable(): ?bool
     {
-        $this->expires_in = $expires_in;
-        return $this;
+        return $this->disposable;
     }
 
     /**
-     * Get custom disposable value
-     *
-     * @param null|bool $request
-     * @return null|bool
-     */
-    public function getDisposable($request)
-    {
-        return $request !== null ? $request : $this->disposable;
-    }
-
-    /**
-     * Set custom disposable value
+     * Set custom disposable for next code generation
      *
      * @param bool $disposable
-     * @return $this
+     * @return self
      */
-    public function setDisposable($disposable = true)
+    public function setDisposable(bool $disposable = true): self
     {
         $this->disposable = $disposable;
+
         return $this;
     }
 
     /**
-     * Get custom set quantity value
+     * Get auth required that has been custom set
      *
-     * @param null|int $request
-     * @return null|int
+     * @return bool
      */
-    public function getQuantity($request)
+    public function getAuthRequired(): bool
     {
-        return $request !== null ? $request : $this->quantity;
+        return $this->auth_required;
     }
 
     /**
-     * Set custom quantity value
+     * Set auth required for next code generation
+     *
+     * @param bool $auth_required
+     * @return self
+     */
+    public function setAuthRequired(bool $auth_required = true): self
+    {
+        $this->auth_required = $auth_required;
+
+        return $this;
+    }
+
+    /**
+     * Get quantity that has been custom set
+     *
+     * @return int|null
+     */
+    public function getQuantity(): ?int
+    {
+        return $this->quantity;
+    }
+
+    /**
+     * Set custom quantity for next code generation
      *
      * @param int $quantity
-     * @return $this
+     * @return self
      */
-    public function setQuantity($quantity)
+    public function setQuantity(int $quantity): self
     {
         $this->quantity = $quantity;
+
         return $this;
     }
 
     /**
-     * Set custom prefix for next generation
-     *
-     * @param string $prefix
-     * @return $this
-     */
-    public function setPrefix($prefix)
-    {
-        $this->prefix = $prefix;
-        return $this;
-    }
-
-    /**
-     * Set custom suffix for next generation
-     *
-     * @param string $suffix
-     * @return $this
-     */
-    public function setSuffix($suffix)
-    {
-        $this->suffix = $suffix;
-        return $this;
-    }
-
-    /**
-     * Reedem promocode to user that it's used from now.
+     * Alias for redeem method.
      *
      * @param string $code
-     *
-     * @return bool|Promocode
-     * @throws AlreadyUsedException
-     * @throws UnauthenticatedException
+     * @return \Zorb\Promocodes\Models\Promocode|null
      */
-    public function redeem($code)
+    public function use(string $code): ?Promocode
     {
-        return $this->apply($code);
+        return $this->redeem($code);
     }
 
     /**
-     * Apply promocode to user that it's used from now.
+     * Use code and output data.
      *
      * @param string $code
-     *
-     * @return bool|Promocode
-     * @throws AlreadyUsedException
-     * @throws UnauthenticatedException
+     * @return \Zorb\Promocodes\Models\Promocode|null
      */
-    public function apply($code)
+    public function redeem(string $code): ?Promocode
     {
         if (!auth()->check()) {
-            throw new UnauthenticatedException;
+            abort(Response::HTTP_UNAUTHORIZED);
         }
 
-        if ($promocode = $this->check($code)) {
-            if ($this->isSecondUsageAttempt($promocode)) {
-                throw new AlreadyUsedException;
+        if ($record = $this->available($code)) {
+            if ($this->secondAttempt($record)) {
+                abort(Response::HTTP_FORBIDDEN);
             }
 
-            $promocode->users()->attach(auth()->id(), [
-                'promocode_id' => $promocode->id,
+            $record->users()->attach(auth()->id(), [
                 'used_at' => Carbon::now(),
             ]);
 
-            if (!is_null($promocode->quantity)) {
-                $promocode->quantity -= 1;
-                $promocode->save();
+            if (!is_null($record->quantity)) {
+                $record->decrement('quantity');
             }
 
-            return $promocode->load('users');
+            return $record->load('users');
         }
 
-        return false;
+        return null;
     }
 
     /**
-     * Check promocode in database if it is valid.
+     * Returns promotional code if available to use.
      *
      * @param string $code
-     *
-     * @return bool|Promocode
+     * @return \Zorb\Promocodes\Models\Promocode|null
      */
-    public function check($code)
+    public function available(string $code): ?Promocode
     {
         $promocode = Promocode::byCode($code)->first();
 
-        if ($promocode === null || $promocode->isExpired() || ($promocode->isDisposable() && $promocode->users()->exists()) || $promocode->isOverAmount()) {
-            return false;
+        if ($promocode === null || !$promocode->isAvailable() || ($promocode->isDisposable() && $promocode->users()->exists())) {
+            return null;
         }
 
         return $promocode;
     }
 
     /**
-     * Check if user is trying to apply code again.
+     * Alias for redeem method.
      *
-     * @param Promocode $promocode
-     *
-     * @return bool
+     * @param string $code
+     * @return \Zorb\Promocodes\Models\Promocode|null
      */
-    public function isSecondUsageAttempt(Promocode $promocode)
+    public function apply(string $code): ?Promocode
     {
-        return $promocode->isDisposable() && $promocode->users()->wherePivot(config('promocodes.related_pivot_key', 'user_id'),
-                auth()->id())->exists();
+        return $this->redeem($code);
+    }
+
+    /**
+     * Alias for disable.
+     *
+     * @param string $code
+     * @return bool|null
+     */
+    public function dispose(string $code): ?bool
+    {
+        return $this->disable($code);
     }
 
     /**
      * Expire code as it won't be usable anymore.
      *
      * @param string $code
-     * @return bool
-     * @throws InvalidPromocodeException
+     * @return bool|null
      */
-    public function disable($code)
+    public function disable(string $code): ?bool
     {
-        $promocode = Promocode::byCode($code)->first();
-
-        if ($promocode === null) {
-            throw new InvalidPromocodeException;
+        if ($promocode = Promocode::byCode($code)->first()) {
+            return $promocode->update([
+                'expires_at' => Carbon::now(),
+                'quantity' => 0,
+            ]);
         }
 
-        $promocode->expires_at = Carbon::now();
-        $promocode->quantity = 0;
-
-        return $promocode->save();
+        return null;
     }
 
     /**
-     * Clear all expired and used promotion codes
-     * that can not be used anymore.
+     * Alias for disable.
+     *
+     * @param string $code
+     * @return bool|null
+     */
+    public function expire(string $code): ?bool
+    {
+        return $this->disable($code);
+    }
+
+    /**
+     * Clear all expired and used codes that can not be used anymore.
      *
      * @return void
      */
-    public function clearRedundant()
+    public function clear(): void
     {
         Promocode::all()->each(function (Promocode $promocode) {
-            if ($promocode->isExpired() || ($promocode->isDisposable() && $promocode->users()->exists()) || $promocode->isOverAmount()) {
+            if ($promocode->isExpired() || ($promocode->disposable && $promocode->users()->exists()) || !$promocode->hasQuantity()) {
                 $promocode->users()->detach();
                 $promocode->delete();
             }
@@ -520,14 +586,14 @@ class Promocodes
     }
 
     /**
-     * Get the list of valid promocodes
+     * Get the list of valid codes.
      *
-     * @return Promocode[]|\Illuminate\Database\Eloquent\Collection
+     * @return \Illuminate\Support\Collection
      */
-    public function all()
+    public function allAvailable(): Collection
     {
         return Promocode::all()->filter(function (Promocode $promocode) {
-            return !$promocode->isExpired() && !($promocode->isDisposable() && $promocode->users()->exists()) && !$promocode->isOverAmount();
+            return !$promocode->isExpired() && !($promocode->disposable && $promocode->users()->exists()) && $promocode->hasQuantity();
         });
     }
 }
