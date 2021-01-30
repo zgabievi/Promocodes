@@ -5,9 +5,11 @@
     "license": "MIT",
     "homepage": "https://github.com/zgabievi/laravel-promocodes",
     "keywords": [
+        "promo code",
+        "coupon code",
+        "discount code",
         "laravel",
-        "promocode",
-        "coupon"
+        "php"
     ],
     "authors": [
         {

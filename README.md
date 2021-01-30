@@ -4,6 +4,8 @@
 [![Packagist](https://img.shields.io/packagist/dt/zgabievi/laravel-onway.svg)](https://packagist.org/packages/zgabievi/laravel-onway)
 [![license](https://img.shields.io/github/license/zgabievi/laravel-onway.svg)](https://packagist.org/packages/zgabievi/laravel-onway)
 
+[![laravel-promocodes](https://banners.beyondco.de/Promocodes.jpeg?theme=light&packageName=zgabievi%2Flaravel-promocodes&pattern=topography&style=style_1&description=Promotional+codes+generator+for+Laravel&md=1&showWatermark=0&fontSize=100px&images=tag)](https://github.com/zgabievi/laravel-promocodes)
+
 ## Table of Contents
 - [Installation](#installation)
 - [Usage](#usage)

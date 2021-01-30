@@ -143,5 +143,4 @@ return [
     */
 
     'delimiter' => '-',
-
 ];
