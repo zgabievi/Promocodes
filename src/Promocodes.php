@@ -107,7 +107,7 @@ class Promocodes
      * @param int $amount
      * @param float|null $reward
      * @param array $data
-     * @param int|null $expires_in
+     * @param Carbon|null $expires_in
      * @param int|null $quantity
      *
      * @return \Illuminate\Support\Collection
@@ -131,9 +131,10 @@ class Promocodes
      * @param int $amount
      * @param null $reward
      * @param array $data
-     * @param int|null $expires_in
-     * @param bool $is_disposable
+     * @param Carbon|null $expires_in
      * @param int|null $quantity
+     * @param bool $is_disposable
+     * @param array $custom_codes
      *
      * @return \Illuminate\Support\Collection
      */
@@ -143,17 +144,20 @@ class Promocodes
         $data = null,
         $expires_in = null,
         $quantity = null,
-        $is_disposable = null
+        $is_disposable = null,
+        $custom_codes = []
     )
     {
         $records = [];
 
-        foreach ($this->output($amount) as $code) {
+        $codes = count($custom_codes) > 0 ? $custom_codes : $this->output($amount);
+
+        foreach ($codes as $code) {
             $records[] = [
                 'code' => $code,
                 'reward' => $this->getReward($reward),
                 'data' => json_encode($this->getData($data)),
-                'expires_at' => $this->getExpiresIn($expires_in) ? Carbon::now()->addDays($this->getExpiresIn($expires_in)) : null,
+                'expires_at' => $expires_in === null ? Carbon::tomorrow()->endOfDay() : $expires_in,
                 'is_disposable' => $this->getDisposable($is_disposable),
                 'quantity' => $this->getQuantity($quantity),
             ];
@@ -309,29 +313,6 @@ class Promocodes
     }
 
     /**
-     * Get custom set expiration days value
-     *
-     * @param null|int $request
-     * @return null|int
-     */
-    public function getExpiresIn($request)
-    {
-        return $request !== null ? $request : $this->expires_in;
-    }
-
-    /**
-     * Set custom expiration days value
-     *
-     * @param int $expires_in
-     * @return $this
-     */
-    public function setExpiresIn($expires_in)
-    {
-        $this->expires_in = $expires_in;
-        return $this;
-    }
-
-    /**
      * Get custom disposable value
      *
      * @param null|bool $request
@@ -462,7 +443,7 @@ class Promocodes
     {
         $promocode = Promocode::byCode($code)->first();
 
-        if ($promocode === null || $promocode->isExpired() || ($promocode->isDisposable() && $promocode->users()->exists()) || $promocode->isOverAmount()) {
+        if ($promocode === null || $promocode->isExpired()) {
             return false;
         }
 
